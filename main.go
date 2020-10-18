@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -54,11 +56,7 @@ func main() {
 	for {
 		<-time.After(5 * time.Second)
 		if hasSpotify(conn) {
-			if artURL := getArtURL(conn); artURL != "" {
-				currentImg = artURL
-			}
-		} else {
-			currentImg = defaultArt
+			currentImg = getArtURL(conn)
 		}
 		if currentImg != prevImg {
 			fmt.Println("Changing to", currentImg)
@@ -71,8 +69,7 @@ func main() {
 func hasSpotify(conn *dbus.Conn) bool {
 	var s []string
 	if err := conn.BusObject().Call(dbusListMethod, 0).Store(&s); err != nil {
-		fmt.Fprintln(os.Stderr, "Failed to get list of owned names:", err)
-		os.Exit(1)
+		return false
 	}
 
 	for _, v := range s {
@@ -86,13 +83,11 @@ func hasSpotify(conn *dbus.Conn) bool {
 func getArtURL(conn *dbus.Conn) string {
 	data, err := conn.Object(spotifyDestination, spotifyPath).GetProperty(spotifyMetadataProperty)
 	if err != nil {
-		fmt.Println(err.Error())
-		return ""
+		return defaultArt
 	}
 	resp, err := http.Get(fmt.Sprintf(spotifyEmbedObjectURL, data.Value().(map[string]dbus.Variant)[spotifyMetaURL].Value().(string)))
 	if err != nil {
-		fmt.Println(err.Error())
-		return ""
+		return defaultArt
 	}
 
 	obj := struct {
@@ -101,24 +96,48 @@ func getArtURL(conn *dbus.Conn) string {
 
 	err = json.NewDecoder(resp.Body).Decode(&obj)
 	if err != nil {
-		fmt.Println(err.Error())
-		return ""
+		return defaultArt
 	}
 
 	splitedURL := strings.Split(obj.URL, "/")
-	filePath := localPath + splitedURL[len(splitedURL)-1]
-	_, err = os.Stat(filePath)
+	filepath := localPath + splitedURL[len(splitedURL)-1]
+	_, err = os.Stat(filepath)
 	if err == nil {
-		return fmt.Sprintf("file://%s", filePath)
+		return fmt.Sprintf("file://%s", filepath)
 	}
 
-	return obj.URL
+	return downloadFile(obj.URL, filepath)
+}
+
+func downloadFile(url, filepath string) string {
+	resp, err := http.Get(url)
+	if err != nil {
+		return defaultArt
+	}
+	defer resp.Body.Close()
+
+	f, err := os.Create(filepath)
+	if err != nil {
+		return defaultArt
+	}
+	defer f.Close()
+
+	w := bufio.NewWriter(f)
+	r := bufio.NewReader(resp.Body)
+
+	_, err = io.Copy(w, r)
+	if err != nil {
+		return defaultArt
+	}
+
+	return fmt.Sprintf("file://%s", filepath)
+
 }
 
 func changeBackgroud(conn *dbus.Conn, url string) {
 	call := conn.Object(plasmaDestination, plasmaPath).Call(plasmaEvaluateMethod, 0, fmt.Sprintf(plasmaScriptTemplate, url))
 	if call.Err != nil {
-		fmt.Println(call.Err.Error())
+		fmt.Fprintln(os.Stderr, "Failed to change background", call.Err.Error())
 	}
 	prevImg = url
 }
